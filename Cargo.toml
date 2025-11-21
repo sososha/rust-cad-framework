@@ -1,0 +1,30 @@
+[package]
+name = "rust-cad-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Windowing & Graphics
+winit = "0.29"
+wgpu = "0.19"
+pollster = "0.3" # async main用
+bytemuck = { version = "1.14", features = ["derive"] }
+cgmath = "0.18" # 行列計算用
+
+# UI
+egui = "0.27"
+egui-wgpu = "0.27"
+egui-winit = "0.27"
+
+# Agent / Async Runtime
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+once_cell = "1.19" # グローバル状態共有用
+parking_lot = "0.12" # 高速なMutex
+env_logger = "0.11.8"
+
+[features]
+default = ["agent"]
+agent = [] # エージェント機能を有効化するフラグ

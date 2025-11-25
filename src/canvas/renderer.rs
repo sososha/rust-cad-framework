@@ -168,20 +168,59 @@ impl Renderer {
             vertices.push(transform(crate::geometry::primitives::Point::new(right, y)));
         }
 
-        // 確定したエンティティ
-        for entity in &state.geometry.entities {
+        // エンティティ描画用クロージャ
+        let mut add_entity = |entity: &Entity| {
             match entity {
                 Entity::Line { start, end } => {
                     vertices.push(transform(*start));
                     vertices.push(transform(*end));
                 }
+                Entity::Rect { p1, p2 } => {
+                    // 4本の線分を描画
+                    let p3 = crate::geometry::primitives::Point::new(p2.x, p1.y);
+                    let p4 = crate::geometry::primitives::Point::new(p1.x, p2.y);
+                    
+                    vertices.push(transform(*p1)); vertices.push(transform(p3));
+                    vertices.push(transform(p3)); vertices.push(transform(*p2));
+                    vertices.push(transform(*p2)); vertices.push(transform(p4));
+                    vertices.push(transform(p4)); vertices.push(transform(*p1));
+                }
+                Entity::Circle { center, radius } => {
+                    // 円を線分近似
+                    let segments = 64;
+                    for i in 0..segments {
+                        let theta1 = (i as f32) * 2.0 * std::f32::consts::PI / (segments as f32);
+                        let theta2 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / (segments as f32);
+                        
+                        let p1 = crate::geometry::primitives::Point::new(
+                            center.x + radius * theta1.cos(),
+                            center.y + radius * theta1.sin(),
+                        );
+                        let p2 = crate::geometry::primitives::Point::new(
+                            center.x + radius * theta2.cos(),
+                            center.y + radius * theta2.sin(),
+                        );
+                        vertices.push(transform(p1));
+                        vertices.push(transform(p2));
+                    }
+                }
+                Entity::Polyline { points } => {
+                    for i in 0..points.len().saturating_sub(1) {
+                        vertices.push(transform(points[i]));
+                        vertices.push(transform(points[i+1]));
+                    }
+                }
             }
+        };
+
+        // 確定したエンティティ
+        for entity in &state.geometry.entities {
+            add_entity(entity);
         }
 
         // プレビュー中のエンティティ
-        if let Some(Entity::Line { start, end }) = &state.geometry.temp_entity {
-            vertices.push(transform(*start));
-            vertices.push(transform(*end));
+        for entity in &state.geometry.temp_entities {
+            add_entity(entity);
         }
 
         let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

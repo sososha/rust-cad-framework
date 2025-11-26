@@ -1203,15 +1203,507 @@ impl SnapSystem {
 
 ---
 
+---
+
+## 7. Snap & Read Commands (スナップ・読み取り)
+
+### 7.1 Endpoint Snap (端点読み取り)
+
+**JWW CAD**: 端点読み取り  
+**AutoCAD**: OSNAP Endpoint  
+**Vectorworks**: Endpoint Snap
+
+```rust
+impl SnapSystem {
+    fn find_endpoint_snap(&self, cursor: Point, entities: &GeometryStore, threshold: f32) -> Option<Point> {
+        let mut nearest: Option<(Point, f32)> = None;
+        
+        for (_, entity) in entities.iter() {
+            let endpoints = entity.get_endpoints();
+            
+            for endpoint in endpoints {
+                let distance = (cursor - endpoint).len();
+                if distance < threshold {
+                    if let Some((_, min_dist)) = nearest {
+                        if distance < min_dist {
+                            nearest = Some((endpoint, distance));
+                        }
+                    } else {
+                        nearest = Some((endpoint, distance));
+                    }
+                }
+            }
+        }
+        
+        nearest.map(|(point, _)| point)
+    }
+}
+
+impl Entity {
+    fn get_endpoints(&self) -> Vec<Point> {
+        match self {
+            Entity::Line { p1, p2 } => vec![*p1, *p2],
+            Entity::Arc(arc) => {
+                vec![
+                    arc.center + Vector2::from_angle(arc.start_angle) * arc.radius,
+                    arc.center + Vector2::from_angle(arc.end_angle) * arc.radius,
+                ]
+            }
+            Entity::Polyline { vertices } => {
+                vec![vertices.first().copied().unwrap(), vertices.last().copied().unwrap()]
+            }
+            _ => vec![],
+        }
+    }
+}
+```
+
+---
+
+### 7.2 Midpoint Snap (中央読み取り)
+
+**JWW CAD**: 中央読み取り  
+**AutoCAD**: OSNAP Midpoint  
+**Vectorworks**: Midpoint Snap
+
+```rust
+impl SnapSystem {
+    fn find_midpoint_snap(&self, cursor: Point, entities: &GeometryStore, threshold: f32) -> Option<Point> {
+        let mut nearest: Option<(Point, f32)> = None;
+        
+        for (_, entity) in entities.iter() {
+            let midpoints = entity.get_midpoints();
+            
+            for midpoint in midpoints {
+                let distance = (cursor - midpoint).len();
+                if distance < threshold {
+                    if let Some((_, min_dist)) = nearest {
+                        if distance < min_dist {
+                            nearest = Some((midpoint, distance));
+                        }
+                    } else {
+                        nearest = Some((midpoint, distance));
+                    }
+                }
+            }
+        }
+        
+        nearest.map(|(point, _)| point)
+    }
+}
+
+impl Entity {
+    fn get_midpoints(&self) -> Vec<Point> {
+        match self {
+            Entity::Line { p1, p2 } => {
+                vec![Point::new((p1.x + p2.x) / 2.0, (p1.y + p2.y) / 2.0)]
+            }
+            Entity::Arc(arc) => {
+                let mid_angle = (arc.start_angle + arc.end_angle) / 2.0;
+                vec![arc.center + Vector2::from_angle(mid_angle) * arc.radius]
+            }
+            Entity::Polyline { vertices } => {
+                let mut midpoints = Vec::new();
+                for i in 0..vertices.len() - 1 {
+                    let mid = Point::new(
+                        (vertices[i].x + vertices[i + 1].x) / 2.0,
+                        (vertices[i].y + vertices[i + 1].y) / 2.0,
+                    );
+                    midpoints.push(mid);
+                }
+                midpoints
+            }
+            _ => vec![],
+        }
+    }
+}
+```
+
+---
+
+### 7.3 Perpendicular Snap (垂線読み取り)
+
+**JWW CAD**: 垂線読み取り  
+**AutoCAD**: OSNAP Perpendicular  
+**Vectorworks**: Perpendicular Snap
+
+```rust
+impl SnapSystem {
+    fn find_perpendicular_snap(&self, cursor: Point, from_point: Point, entities: &GeometryStore, threshold: f32) -> Option<Point> {
+        let mut nearest: Option<(Point, f32)> = None;
+        
+        for (_, entity) in entities.iter() {
+            if let Some(perp_point) = entity.get_perpendicular_point(from_point) {
+                let distance = (cursor - perp_point).len();
+                if distance < threshold {
+                    if let Some((_, min_dist)) = nearest {
+                        if distance < min_dist {
+                            nearest = Some((perp_point, distance));
+                        }
+                    } else {
+                        nearest = Some((perp_point, distance));
+                    }
+                }
+            }
+        }
+        
+        nearest.map(|(point, _)| point)
+    }
+}
+
+impl Entity {
+    fn get_perpendicular_point(&self, from: Point) -> Option<Point> {
+        match self {
+            Entity::Line { p1, p2 } => {
+                // 線分への垂線の足
+                let line_vec = *p2 - *p1;
+                let to_point = from - *p1;
+                
+                let t = to_point.dot(&line_vec) / line_vec.dot(&line_vec);
+                
+                // t を [0, 1] にクランプ（線分上）
+                let t_clamped = t.clamp(0.0, 1.0);
+                
+                Some(*p1 + line_vec * t_clamped)
+            }
+            Entity::Circle { center, radius } => {
+                // 円への垂線の足（円周上の最近点）
+                let direction = (from - *center).normalize();
+                Some(*center + direction * *radius)
+            }
+            _ => None,
+        }
+    }
+}
+```
+
+---
+
+## 8. Advanced Drawing Commands
+
+### 8.1 Double Line (二重線)
+
+**JWW CAD**: 2線  
+**Vectorworks**: Double Line Tool
+
+```rust
+struct DoubleLineTool {
+    width: f32,
+    start: Option<Point>,
+}
+
+impl Tool for DoubleLineTool {
+    fn mouse_down(&mut self, pos: Point, state: &mut AppState) {
+        if self.start.is_none() {
+            self.start = Some(pos);
+        } else {
+            let p1 = self.start.unwrap();
+            let p2 = pos;
+            
+            // 線の方向ベクトル
+            let direction = (p2 - p1).normalize();
+            let perpendicular = Vector2::new(-direction.y, direction.x);
+            
+            let offset = perpendicular * (self.width / 2.0);
+            
+            // 2本の平行線を作成
+            state.geometry.add_entity(Entity::Line {
+                p1: p1 + offset,
+                p2: p2 + offset,
+            });
+            
+            state.geometry.add_entity(Entity::Line {
+                p1: p1 - offset,
+                p2: p2 - offset,
+            });
+            
+            // 端部を閉じる
+            state.geometry.add_entity(Entity::Line {
+                p1: p1 + offset,
+                p2: p1 - offset,
+            });
+            
+            state.geometry.add_entity(Entity::Line {
+                p1: p2 + offset,
+                p2: p2 - offset,
+            });
+            
+            self.start = None;
+        }
+    }
+}
+```
+
+---
+
+### 8.2 Stretch (伸縮)
+
+**JWW CAD**: 伸縮  
+**AutoCAD**: STRETCH (S)
+
+```rust
+struct StretchTool {
+    selection_window: Option<Rect>,
+    base_point: Option<Point>,
+    affected_entities: Vec<(EntityId, Vec<usize>)>, // (entity_id, vertex_indices)
+}
+
+impl Tool for StretchTool {
+    fn mouse_down(&mut self, pos: Point, state: &mut AppState) {
+        if self.selection_window.is_none() {
+            // 選択窓の開始
+            self.selection_window = Some(Rect::from_point(pos));
+        } else if self.base_point.is_none() {
+            // 選択窓の終了 & 基準点設定
+            let window = self.selection_window.unwrap();
+            
+            // 窓に交差する頂点を見つける
+            for (id, entity) in state.geometry.iter() {
+                let vertices = entity.get_vertices();
+                let mut affected_vertices = Vec::new();
+                
+                for (i, vertex) in vertices.iter().enumerate() {
+                    if window.contains(*vertex) {
+                        affected_vertices.push(i);
+                    }
+                }
+                
+                if !affected_vertices.is_empty() {
+                    self.affected_entities.push((id, affected_vertices));
+                }
+            }
+            
+            self.base_point = Some(pos);
+        } else {
+            // 伸縮を実行
+            let offset = pos - self.base_point.unwrap();
+            
+            for (entity_id, vertex_indices) in &self.affected_entities {
+                if let Some(entity) = state.geometry.get_entity_mut(*entity_id) {
+                    entity.stretch_vertices(vertex_indices, offset);
+                }
+            }
+            
+            self.selection_window = None;
+            self.base_point = None;
+            self.affected_entities.clear();
+        }
+    }
+}
+
+impl Entity {
+    fn stretch_vertices(&mut self, indices: &[usize], offset: Vector2) {
+        match self {
+            Entity::Line { p1, p2 } => {
+                if indices.contains(&0) { *p1 = *p1 + offset; }
+                if indices.contains(&1) { *p2 = *p2 + offset; }
+            }
+            Entity::Polyline { vertices } => {
+                for &i in indices {
+                    if i < vertices.len() {
+                        vertices[i] = vertices[i] + offset;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+```
+
+---
+
+## 9. Selection Commands (範囲選択)
+
+### 9.1 Window Selection (内包範囲選択)
+
+**概念**: 範囲内に**完全に収まった**エンティティのみ選択
+
+```rust
+enum SelectionMode {
+    Window,   // 内包（完全に収まる）
+    Crossing, // 接触（少しでも触れる）
+}
+
+struct SelectionTool {
+    mode: SelectionMode,
+    start_point: Option<Point>,
+    end_point: Option<Point>,
+}
+
+impl Tool for SelectionTool {
+    fn mouse_down(&mut self, pos: Point, state: &mut AppState) {
+        self.start_point = Some(pos);
+    }
+    
+    fn mouse_up(&mut self, pos: Point, state: &mut AppState) {
+        if let Some(start) = self.start_point {
+            self.end_point = Some(pos);
+            
+            let rect = Rect::from_two_points(start, pos);
+            
+            // 選択モードを自動判定（左→右: Window, 右→左: Crossing）
+            self.mode = if pos.x > start.x {
+                SelectionMode::Window
+            } else {
+                SelectionMode::Crossing
+            };
+            
+            // エンティティを選択
+            for (id, entity) in state.geometry.iter() {
+                let should_select = match self.mode {
+                    SelectionMode::Window => entity.is_fully_inside(&rect),
+                    SelectionMode::Crossing => entity.intersects_rect(&rect),
+                };
+                
+                if should_select {
+                    state.selection.add(id);
+                }
+            }
+            
+            self.start_point = None;
+            self.end_point = None;
+        }
+    }
+    
+    fn render_preview(&self, renderer: &mut Renderer) {
+        if let (Some(start), Some(end)) = (self.start_point, self.end_point) {
+            let rect = Rect::from_two_points(start, end);
+            
+            // 選択モードに応じて色を変える
+            let color = match self.mode {
+                SelectionMode::Window => Color::BLUE,
+                SelectionMode::Crossing => Color::GREEN,
+            };
+            
+            renderer.draw_rect_outline(rect, color);
+        }
+    }
+}
+```
+
+---
+
+### 9.2 Entity Selection Logic
+
+```rust
+impl Entity {
+    /// 完全に矩形内に収まっているか（Window Selection）
+    fn is_fully_inside(&self, rect: &Rect) -> bool {
+        match self {
+            Entity::Line { p1, p2 } => {
+                rect.contains(*p1) && rect.contains(*p2)
+            }
+            Entity::Circle { center, radius } => {
+                // 円が完全に矩形内
+                rect.contains(*center - Vector2::new(*radius, *radius)) &&
+                rect.contains(*center + Vector2::new(*radius, *radius))
+            }
+            Entity::Polyline { vertices } => {
+                vertices.iter().all(|v| rect.contains(*v))
+            }
+            Entity::Arc(arc) => {
+                // 円弧の全ての点が矩形内
+                let start = arc.center + Vector2::from_angle(arc.start_angle) * arc.radius;
+                let end = arc.center + Vector2::from_angle(arc.end_angle) * arc.radius;
+                rect.contains(start) && rect.contains(end) && rect.contains(arc.center)
+            }
+            _ => false,
+        }
+    }
+    
+    /// 矩形と交差しているか（Crossing Selection）
+    fn intersects_rect(&self, rect: &Rect) -> bool {
+        match self {
+            Entity::Line { p1, p2 } => {
+                // 線分が矩形と交差
+                rect.contains(*p1) || rect.contains(*p2) || 
+                self.line_intersects_rect(*p1, *p2, rect)
+            }
+            Entity::Circle { center, radius } => {
+                // 円が矩形と交差
+                self.circle_intersects_rect(*center, *radius, rect)
+            }
+            Entity::Polyline { vertices } => {
+                // いずれかの頂点が矩形内、または線分が矩形と交差
+                vertices.iter().any(|v| rect.contains(*v)) ||
+                vertices.windows(2).any(|w| {
+                    self.line_intersects_rect(w[0], w[1], rect)
+                })
+            }
+            _ => false,
+        }
+    }
+    
+    fn line_intersects_rect(&self, p1: Point, p2: Point, rect: &Rect) -> bool {
+        // 線分と矩形の4辺との交差判定
+        let edges = [
+            (rect.min, Point::new(rect.max.x, rect.min.y)),
+            (Point::new(rect.max.x, rect.min.y), rect.max),
+            (rect.max, Point::new(rect.min.x, rect.max.y)),
+            (Point::new(rect.min.x, rect.max.y), rect.min),
+        ];
+        
+        edges.iter().any(|(e1, e2)| {
+            self.line_segments_intersect(p1, p2, *e1, *e2)
+        })
+    }
+    
+    fn line_segments_intersect(&self, p1: Point, p2: Point, p3: Point, p4: Point) -> bool {
+        let d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
+        if d.abs() < 1e-10 { return false; } // 平行
+        
+        let t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d;
+        let u = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d;
+        
+        t >= 0.0 && t <= 1.0 && u >= 0.0 && u <= 1.0
+    }
+    
+    fn circle_intersects_rect(&self, center: Point, radius: f32, rect: &Rect) -> bool {
+        // 矩形の最も近い点を見つける
+        let closest_x = center.x.clamp(rect.min.x, rect.max.x);
+        let closest_y = center.y.clamp(rect.min.y, rect.max.y);
+        let closest = Point::new(closest_x, closest_y);
+        
+        // 距離が半径以下なら交差
+        (center - closest).len() <= radius
+    }
+}
+```
+
+---
+
 ## 📊 コマンド実装優先度
 
 | 優先度 | コマンド | 理由 |
 |--------|---------|------|
-| **P0** | Line, Circle, Rectangle | 基本中の基本 |
-| **P1** | Polyline, Arc, Move, Copy | 実用上必須 |
-| **P2** | Offset, Trim, Extend, Fillet | 編集の要 |
-| **P3** | Polygon, Spline, Mirror, Rotate | 高度な作図 |
-| **P4** | Hatch, Array, Constraints | 専門的機能 |
+| **P0** | Line, Circle, Rectangle, Endpoint Snap, Midpoint Snap | 基本中の基本 |
+| **P1** | Polyline, Arc, Move, Copy, Window/Crossing Selection | 実用上必須 |
+| **P2** | Offset, Trim, Extend, Fillet, Perpendicular Snap | 編集の要 |
+| **P3** | Polygon, Spline, Mirror, Rotate, Double Line | 高度な作図 |
+| **P4** | Hatch, Array, Constraints, Stretch | 専門的機能 |
+
+---
+
+## 🎯 追加実装コマンド一覧
+
+### 新規追加（この更新で）
+1. ✅ **Endpoint Snap** - 端点読み取り
+2. ✅ **Midpoint Snap** - 中央読み取り
+3. ✅ **Perpendicular Snap** - 垂線読み取り
+4. ✅ **Double Line** - 二重線
+5. ✅ **Stretch** - 伸縮
+6. ✅ **Window Selection** - 内包範囲選択
+7. ✅ **Crossing Selection** - 接触範囲選択
+
+### 既存コマンド
+- Line, Circle, Rectangle, Arc, Polyline
+- Polygon, Spline, Hatch
+- Move, Copy, Offset, Trim, Extend
+- Fillet, Mirror, Rotate, Scale, Array
+- Parallel, Perpendicular, Tangent (Constraints)
+
+**総コマンド数**: **47+** 実装例
 
 ---
 

@@ -1,0 +1,29 @@
+[package]
+name = "reference-cad"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cad-core = { path = "../../crates/cad-core" }
+cad-rendering = { path = "../../crates/cad-rendering" }
+cad-tools = { path = "../../crates/cad-tools" }
+cad-ui = { path = "../../crates/cad-ui" }
+winit = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+cgmath = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
+env_logger = { workspace = true }
+
+[features]
+default = ["agent"]
+agent = []

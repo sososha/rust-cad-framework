@@ -1,0 +1,11 @@
+[package]
+name = "cad-rendering"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cad-core = { path = "../cad-core" }
+wgpu = { workspace = true }
+winit = { workspace = true }
+bytemuck = { workspace = true }
+cgmath = { workspace = true }

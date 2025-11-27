@@ -1,0 +1,8 @@
+[package]
+name = "cad-tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cad-core = { path = "../cad-core" }
+winit = { workspace = true }

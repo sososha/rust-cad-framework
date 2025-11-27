@@ -1,7 +1,8 @@
+use cad_core::{Entity, Point, Document, CommandManager};
 use cad_tools::{Tool, LineTool, ToolAction};
-use cad_core::{Entity, Point};
 use cad_rendering::Renderer;
-use cad_ui::{ToolPalette, UIComponent};
+use cad_ui::{ToolPalette, UIAction};
+use cad_io::{CADSerializer, JSONSerializer};
 use winit::{
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     window::Window,
@@ -10,26 +11,48 @@ use egui_wgpu::ScreenDescriptor;
 
 use std::sync::Arc;
 
+use cad_agent_interface::{AgentState, AgentCommand};
+use parking_lot::Mutex;
+
 pub struct App {
-    window: Arc<Window>,
-    renderer: Renderer,
-    entities: Vec<Entity>,
-    is_panning: bool,
-    last_mouse_pos: Option<winit::dpi::PhysicalPosition<f64>>,
-    active_tool: Box<dyn Tool>,
+    pub window: Arc<Window>,
+    pub renderer: Renderer,
+    pub document: Arc<Mutex<Document>>, // Changed to Arc<Mutex<>> for sharing
+    pub command_manager: CommandManager,
+    pub is_panning: bool,
+    pub last_mouse_pos: Option<winit::dpi::PhysicalPosition<f64>>,
+    pub active_tool: Box<dyn Tool>,
+    pub active_snap_point: Option<Point>,
+    
+    // Agent Interface
+    pub agent_command_receiver: tokio::sync::mpsc::UnboundedReceiver<AgentCommand>,
     
     // UI
-    egui_ctx: egui::Context,
-    egui_state: egui_winit::State,
-    egui_renderer: egui_wgpu::Renderer,
-    tool_palette: ToolPalette,
+    pub egui_ctx: egui::Context,
+    pub egui_state: egui_winit::State,
+    pub egui_renderer: egui_wgpu::Renderer,
+    pub tool_palette: ToolPalette,
 }
 
 impl App {
     pub async fn new(window: Arc<Window>) -> Self {
         let renderer = Renderer::new(&window).await;
         
-        let entities = Vec::new();
+        let document = Arc::new(Mutex::new(Document::new()));
+        let command_manager = CommandManager::new();
+
+        // Agent Interface Setup
+        let (agent_sender, agent_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let agent_state = AgentState {
+            document: document.clone(),
+            command_sender: agent_sender,
+        };
+        
+        // Spawn Agent Server
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(cad_agent_interface::start_server(agent_state));
+        });
 
         // UI Setup
         let egui_ctx = egui::Context::default();
@@ -51,17 +74,20 @@ impl App {
         let mut app = Self {
             window,
             renderer,
-            entities,
+            document,
+            command_manager,
             is_panning: false,
             last_mouse_pos: None,
             active_tool: Box::new(LineTool::new()),
+            active_snap_point: None,
+            agent_command_receiver: agent_receiver,
             egui_ctx,
             egui_state,
             egui_renderer,
             tool_palette: ToolPalette::new(),
         };
         
-        app.renderer.update_geometry(&app.entities);
+        app.renderer.update_geometry(&app.document.lock().get_visible_entities());
         app
     }
 
@@ -70,94 +96,89 @@ impl App {
     }
 
     pub fn input(&mut self, event: &WindowEvent) -> bool {
-        let _ = self.egui_state.on_window_event(&self.window, event);
-        
-        if self.egui_ctx.wants_pointer_input() || self.egui_ctx.wants_keyboard_input() {
-            return true; 
+        // 1. Pass event to UI
+        let response = self.egui_state.on_window_event(&self.window, event);
+        if response.consumed {
+            return true;
         }
 
+        // Handle Panning (Middle Mouse / Space + Drag)
         match event {
-            WindowEvent::MouseWheel { delta, .. } => {
-                let zoom_factor = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => 1.0 + y * 0.1,
-                    MouseScrollDelta::PixelDelta(pos) => 1.0 + pos.y as f32 * 0.001,
-                };
-                self.renderer.camera.zoom *= zoom_factor;
-                self.renderer.camera.zoom = self.renderer.camera.zoom.max(0.1).min(100.0);
-                true
-            }
             WindowEvent::MouseInput { state, button, .. } => {
                 if *button == MouseButton::Middle {
                     self.is_panning = *state == ElementState::Pressed;
-                    return true;
                 }
-                
-                if *button == MouseButton::Left && *state == ElementState::Pressed {
-                    if let Some(pos) = self.last_mouse_pos {
-                        let world_pos = self.renderer.camera.screen_to_world(
-                            cgmath::Vector2::new(pos.x as f32, pos.y as f32),
-                            self.renderer.size.width as f32,
-                            self.renderer.size.height as f32
-                        );
-                        let point = Point::new(world_pos.x, world_pos.y);
-                        
-                        if let Some(action) = self.active_tool.mouse_down(point) {
-                            match action {
-                                ToolAction::Commit(entity) => {
-                                    self.entities.push(entity);
-                                    self.update_geometry_with_preview();
-                                }
-                                _ => {
-                                    self.update_geometry_with_preview();
-                                }
-                            }
-                        }
-                    }
-                    return true;
-                }
-                false
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let current_pos = *position;
                 if self.is_panning {
                     if let Some(last_pos) = self.last_mouse_pos {
-                        let dx = (current_pos.x - last_pos.x) as f32;
-                        let dy = (current_pos.y - last_pos.y) as f32;
-                        
-                        let zoom = self.renderer.camera.zoom;
-                        let pan_speed = 2.0 / self.renderer.size.height as f32 / zoom;
-                        
-                        self.renderer.camera.pan.x += dx * pan_speed;
-                        self.renderer.camera.pan.y -= dy * pan_speed;
+                        let dx = position.x - last_pos.x;
+                        let dy = position.y - last_pos.y;
+                        self.renderer.camera.pan(dx as f32, dy as f32);
                     }
-                } else {
-                    // Tool Hover
-                    let world_pos = self.renderer.camera.screen_to_world(
-                        cgmath::Vector2::new(current_pos.x as f32, current_pos.y as f32),
-                        self.renderer.size.width as f32,
-                        self.renderer.size.height as f32
-                    );
-                    let point = Point::new(world_pos.x, world_pos.y);
-                    self.active_tool.mouse_move(point);
-                    self.update_geometry_with_preview();
                 }
-                self.last_mouse_pos = Some(current_pos);
-                true
+                self.last_mouse_pos = Some(*position);
             }
-            _ => false,
+            WindowEvent::MouseWheel { delta, .. } => {
+                let zoom_factor = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => 1.0 - y * 0.1,
+                    MouseScrollDelta::PixelDelta(pos) => 1.0 - pos.y as f32 * 0.001,
+                };
+                self.renderer.camera.zoom(zoom_factor);
+            }
+            _ => {}
         }
+
+        false
     }
 
-    fn update_geometry_with_preview(&mut self) {
-        let mut display_entities = self.entities.clone();
+    pub fn update_geometry_with_preview(&mut self) {
+        let mut display_entities = self.document.lock().get_visible_entities();
         if let Some(preview) = self.active_tool.get_preview() {
             display_entities.push(preview);
+        }
+        // Render Snap Indicator
+        if let Some(snap_pos) = self.active_snap_point {
+            // Draw a small circle for snap point
+            display_entities.push(Entity::Circle { center: snap_pos, radius: 5.0 / self.renderer.camera.zoom });
         }
         self.renderer.update_geometry(&display_entities);
     }
 
     pub fn update(&mut self) {
-        // Update logic here
+        // Handle Agent Commands
+        while let Ok(command) = self.agent_command_receiver.try_recv() {
+            match command {
+                AgentCommand::Undo => {
+                    self.command_manager.undo(&mut self.document.lock());
+                    self.renderer.update_geometry(&self.document.lock().get_visible_entities());
+                }
+                AgentCommand::Redo => {
+                    self.command_manager.redo(&mut self.document.lock());
+                    self.renderer.update_geometry(&self.document.lock().get_visible_entities());
+                }
+                AgentCommand::SelectTool(name) => {
+                    if name == "Line" {
+                        self.active_tool = Box::new(LineTool::new());
+                        self.tool_palette.selected_tool = "Line".to_string();
+                    } else if name == "Circle" {
+                        // Circle tool not implemented yet, but switch logic here
+                        self.tool_palette.selected_tool = "Circle".to_string();
+                    }
+                }
+                AgentCommand::DrawLine { x1, y1, x2, y2 } => {
+                    // Direct manipulation for testing
+                    use cad_core::{Entity, Point};
+                    let line = Entity::Line {
+                        p1: Point::new(x1, y1),
+                        p2: Point::new(x2, y2),
+                    };
+                    let command = Box::new(cad_tools::AddEntityCommand::new(line));
+                    self.command_manager.execute(command, &mut self.document.lock());
+                    self.renderer.update_geometry(&self.document.lock().get_visible_entities());
+                }
+            }
+        }
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -188,13 +209,56 @@ impl App {
         let raw_input = self.egui_state.take_egui_input(&self.window);
         self.egui_ctx.begin_frame(raw_input);
         
-        self.tool_palette.show(&self.egui_ctx);
+        let action = self.tool_palette.show(&self.egui_ctx);
+        cad_ui::LayerManager::show(&self.egui_ctx, &mut self.document.lock());
         
-        // Tool Switching Logic
-        if self.tool_palette.selected_tool == "Line" && self.active_tool.name() != "Line" {
-             self.active_tool = Box::new(LineTool::new());
+        match action {
+            UIAction::SelectTool(name) => {
+                if name == "Line" {
+                    self.active_tool = Box::new(LineTool::new());
+                }
+            }
+            UIAction::Save => {
+                let serializer = JSONSerializer;
+                // Saving visible entities for now. Ideally we save the whole Document structure.
+                // But CADSerializer expects &[Entity].
+                // We should update CADSerializer to support Document or save flattened list.
+                // For backward compatibility with current serializer, saving flattened list.
+                if let Err(e) = serializer.save(&self.document.lock().get_visible_entities(), std::path::Path::new("drawing.json")) {
+                    eprintln!("Failed to save: {}", e);
+                } else {
+                    println!("Saved to drawing.json");
+                }
+            }
+            UIAction::Load => {
+                let serializer = JSONSerializer;
+                match serializer.load(std::path::Path::new("drawing.json")) {
+                    Ok(loaded_entities) => {
+                        // Loading flat entities into a new document structure
+                        // For now, put them all in the default layer
+                        let mut doc = self.document.lock();
+                        *doc = Document::new();
+                        if let Some(layer) = doc.layers.get_mut(0) {
+                            layer.entities = loaded_entities;
+                        }
+                        self.renderer.update_geometry(&doc.get_visible_entities());
+                        println!("Loaded from drawing.json");
+                    }
+                    Err(e) => eprintln!("Failed to load: {}", e),
+                }
+            }
+            UIAction::Undo => {
+                let mut doc = self.document.lock();
+                self.command_manager.undo(&mut doc);
+                self.renderer.update_geometry(&doc.get_visible_entities());
+            }
+            UIAction::Redo => {
+                let mut doc = self.document.lock();
+                self.command_manager.redo(&mut doc);
+                self.renderer.update_geometry(&doc.get_visible_entities());
+            }
+            UIAction::None => {}
         }
-        // Add Circle tool switching when implemented
         
         let full_output = self.egui_ctx.end_frame();
         let paint_jobs = self.egui_ctx.tessellate(full_output.shapes, self.egui_ctx.pixels_per_point());

@@ -1,0 +1,10 @@
+[package]
+name = "cad-io"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cad-core = { path = "../cad-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "1.0"

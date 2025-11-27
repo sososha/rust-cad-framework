@@ -8,6 +8,8 @@ cad-core = { path = "../../crates/cad-core" }
 cad-rendering = { path = "../../crates/cad-rendering" }
 cad-tools = { path = "../../crates/cad-tools" }
 cad-ui = { path = "../../crates/cad-ui" }
+cad-io = { path = "../../crates/cad-io" }
+cad-agent-interface = { path = "../../crates/cad-agent-interface" }
 winit = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }

@@ -348,12 +348,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
 
 [[package]]
+name = "cad-agent-interface"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "cad-core",
+ "cad-tools",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "cad-core"
 version = "0.1.0"
 dependencies = [
  "cgmath",
  "serde",
  "slotmap",
+]
+
+[[package]]
+name = "cad-io"
+version = "0.1.0"
+dependencies = [
+ "cad-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1889,7 +1912,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "bytemuck",
+ "cad-agent-interface",
  "cad-core",
+ "cad-io",
  "cad-rendering",
  "cad-tools",
  "cad-ui",

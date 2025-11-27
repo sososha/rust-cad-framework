@@ -71,6 +71,18 @@ impl Camera {
         let world = inv_view_proj * ndc;
         Vector2::new(world.x, world.y)
     }
+
+    pub fn pan(&mut self, dx: f32, dy: f32) {
+        // Adjust pan speed based on zoom?
+        // For now direct mapping
+        self.pan.x += dx;
+        self.pan.y -= dy; // Screen Y is down, World Y is up usually, but here we might need to check
+    }
+
+    pub fn zoom(&mut self, factor: f32) {
+        self.zoom *= factor;
+        self.zoom = self.zoom.max(0.1).min(100.0);
+    }
 }
 
 #[repr(C)]
